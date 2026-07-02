@@ -13,8 +13,10 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
     </PackageReference>
+
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.9.0" />
-    <PackageReference Include="Microsoft.AspNetCore.HealthChecks.SqlServer" Version="8.0.2" />
+
+    <PackageReference Include="AspNetCore.HealthChecks.SqlServer" Version="8.0.2" />
   </ItemGroup>
 
   <ItemGroup>
