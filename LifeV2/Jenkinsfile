@@ -1,0 +1,159 @@
+// LifeV2 — Declarative Jenkins pipeline
+// CI: restore -> build -> unit + integration tests (with coverage) -> publish
+// CD: build & push Docker image -> deploy (auto to Staging, gated to Production)
+//
+// Prerequisites on the Jenkins agent:
+//   - .NET 8 SDK on PATH (or use the docker agent block below)
+//   - Docker engine available to the agent
+//   - Credentials configured in Jenkins (see environment block)
+
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        skipStagesAfterUnstable()
+    }
+
+    environment {
+        DOTNET_CLI_TELEMETRY_OPTOUT  = '1'
+        DOTNET_NOLOGO                = '1'
+        DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
+        SOLUTION       = 'LifeV2.sln'
+        API_PROJECT    = 'src/LifeV2.API/LifeV2.API.csproj'
+        BUILD_CONFIG   = 'Release'
+
+        // Configure these for your registry/hosts 
+        REGISTRY       = 'your-registry.example.com'
+        IMAGE_NAME     = 'lifev2-api'
+        IMAGE_TAG      = "${env.BUILD_NUMBER}"
+        // Jenkins credentials IDs (create these under Manage Jenkins > Credentials):
+        REGISTRY_CRED  = 'lifev2-registry-credentials'   // username/password
+        STAGING_SSH    = 'lifev2-staging-ssh'            // SSH key for staging host
+        PROD_SSH       = 'lifev2-prod-ssh'               // SSH key for prod host
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Restore') {
+            steps {
+                sh 'dotnet restore "$SOLUTION"'
+            }
+        }
+
+        stage('Build') {
+            steps {
+                sh 'dotnet build "$SOLUTION" -c "$BUILD_CONFIG" --no-restore'
+            }
+        }
+
+        stage('Test') {
+            steps {
+                sh '''
+                    dotnet test "$SOLUTION" \
+                        -c "$BUILD_CONFIG" \
+                        --no-build \
+                        --logger "trx;LogFileName=test-results.trx" \
+                        --collect:"XPlat Code Coverage" \
+                        --results-directory ./TestResults
+                '''
+            }
+            post {
+                always {
+                    // Requires the "MSTest" / "xUnit" plugin to publish .trx
+                    junit allowEmptyResults: true, testResults: '**/TestResults/**/*.trx'
+                    archiveArtifacts artifacts: '**/TestResults/**/*', allowEmptyArchive: true
+                }
+            }
+        }
+
+        stage('Publish') {
+            steps {
+                sh '''
+                    dotnet publish "$API_PROJECT" \
+                        -c "$BUILD_CONFIG" \
+                        --no-build \
+                        -o ./publish
+                '''
+                archiveArtifacts artifacts: 'publish/**', fingerprint: true
+            }
+        }
+
+        stage('Docker Build & Push') {
+            when {
+                anyOf {
+                    branch 'main'
+                    branch 'develop'
+                }
+            }
+            steps {
+                script {
+                    def fullImage = "${REGISTRY}/${IMAGE_NAME}"
+                    docker.withRegistry("https://${REGISTRY}", REGISTRY_CRED) {
+                        def img = docker.build("${fullImage}:${IMAGE_TAG}", "-f Dockerfile .")
+                        img.push()
+                        img.push('latest')
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Staging') {
+            when { branch 'develop' }
+            steps {
+                echo "Auto-deploying ${IMAGE_NAME}:${IMAGE_TAG} to STAGING"
+                sshagent(credentials: [STAGING_SSH]) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no deploy@staging-host "
+                            cd /opt/lifev2 &&
+                            export IMAGE_TAG=${IMAGE_TAG} &&
+                            docker compose pull api &&
+                            docker compose up -d api &&
+                            docker image prune -f
+                        "
+                    '''
+                }
+            }
+        }
+
+        stage('Approve Production') {
+            when { branch 'main' }
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    input message: "Deploy ${IMAGE_NAME}:${IMAGE_TAG} to PRODUCTION?", ok: 'Deploy'
+                }
+            }
+        }
+
+        stage('Deploy to Production') {
+            when { branch 'main' }
+            steps {
+                echo "Deploying ${IMAGE_NAME}:${IMAGE_TAG} to PRODUCTION"
+                sshagent(credentials: [PROD_SSH]) {
+                    sh '''
+                        ssh -o StrictHostKeyChecking=no deploy@prod-host "
+                            cd /opt/lifev2 &&
+                            export IMAGE_TAG=${IMAGE_TAG} &&
+                            docker compose pull api &&
+                            docker compose up -d api &&
+                            docker image prune -f
+                        "
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        success { echo "✅ Pipeline succeeded: build #${env.BUILD_NUMBER}" }
+        failure { echo "❌ Pipeline failed: build #${env.BUILD_NUMBER}" }
+        always  { cleanWs() }
+    }
+}
