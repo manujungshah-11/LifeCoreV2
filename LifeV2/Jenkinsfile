@@ -32,28 +32,43 @@ pipeline {
             }
         }
 
+        // Temporary stage to verify the workspace
+        stage('Show Workspace') {
+            steps {
+                bat 'cd'
+                bat 'dir'
+                bat 'dir LifeV2'
+            }
+        }
+
         stage('Restore') {
             steps {
-                bat 'dotnet restore "%SOLUTION%"'
+                dir('LifeV2') {
+                    bat 'dotnet restore "%SOLUTION%"'
+                }
             }
         }
 
         stage('Build') {
             steps {
-                bat 'dotnet build "%SOLUTION%" -c %BUILD_CONFIG% --no-restore'
+                dir('LifeV2') {
+                    bat 'dotnet build "%SOLUTION%" -c %BUILD_CONFIG% --no-restore'
+                }
             }
         }
 
         stage('Test') {
             steps {
-                bat '''
-                dotnet test "%SOLUTION%" ^
-                    -c %BUILD_CONFIG% ^
-                    --no-build ^
-                    --logger "trx;LogFileName=test-results.trx" ^
-                    --collect:"XPlat Code Coverage" ^
-                    --results-directory TestResults
-                '''
+                dir('LifeV2') {
+                    bat '''
+                    dotnet test "%SOLUTION%" ^
+                        -c %BUILD_CONFIG% ^
+                        --no-build ^
+                        --logger "trx;LogFileName=test-results.trx" ^
+                        --collect:"XPlat Code Coverage" ^
+                        --results-directory TestResults
+                    '''
+                }
             }
 
             post {
@@ -66,20 +81,24 @@ pipeline {
 
         stage('Publish') {
             steps {
-                bat '''
-                dotnet publish "%API_PROJECT%" ^
-                    -c %BUILD_CONFIG% ^
-                    --no-build ^
-                    -o publish
-                '''
+                dir('LifeV2') {
+                    bat '''
+                    dotnet publish "%API_PROJECT%" ^
+                        -c %BUILD_CONFIG% ^
+                        --no-build ^
+                        -o publish
+                    '''
 
-                archiveArtifacts artifacts: 'publish/**', fingerprint: true
+                    archiveArtifacts artifacts: 'publish/**', fingerprint: true
+                }
             }
         }
 
         stage('Docker Build') {
             steps {
-                bat 'docker build -t %IMAGE_NAME%:%IMAGE_TAG% -f Dockerfile .'
+                dir('LifeV2') {
+                    bat 'docker build -t %IMAGE_NAME%:%IMAGE_TAG% -f Dockerfile .'
+                }
             }
         }
 
@@ -98,15 +117,17 @@ pipeline {
                     passwordVariable: 'DOCKER_PASS'
                 )]) {
 
-                    bat '''
-                    echo %DOCKER_PASS% | docker login %REGISTRY% -u %DOCKER_USER% --password-stdin
+                    dir('LifeV2') {
+                        bat '''
+                        echo %DOCKER_PASS% | docker login %REGISTRY% -u %DOCKER_USER% --password-stdin
 
-                    docker tag %IMAGE_NAME%:%IMAGE_TAG% %REGISTRY%/%IMAGE_NAME%:%IMAGE_TAG%
+                        docker tag %IMAGE_NAME%:%IMAGE_TAG% %REGISTRY%/%IMAGE_NAME%:%IMAGE_TAG%
 
-                    docker push %REGISTRY%/%IMAGE_NAME%:%IMAGE_TAG%
+                        docker push %REGISTRY%/%IMAGE_NAME%:%IMAGE_TAG%
 
-                    docker logout %REGISTRY%
-                    '''
+                        docker logout %REGISTRY%
+                        '''
+                    }
                 }
             }
         }
